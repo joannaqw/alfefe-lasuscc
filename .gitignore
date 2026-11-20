@@ -1,0 +1,4 @@
+slurm-*.out
+*.chk
+__pycache__/
+*.pyc

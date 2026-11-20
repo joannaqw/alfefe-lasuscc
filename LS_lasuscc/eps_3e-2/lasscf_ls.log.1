@@ -1,0 +1,273 @@
+#INFO: **** input file is /project/lgagliardi/qjwang/al_fe_fe/LS/03/alfefe_lasuscc.py ****
+import pyscf
+from pyscf import gto, scf, lib, mcscf
+from mrh.my_pyscf.mcscf.lasscf_o0 import LASSCF
+from mrh.exploratory.unitary_cc import lasuccsd
+from mrh.exploratory.unitary_cc.uccsd_sym0 import get_uccsd_op
+from mrh.exploratory.citools import grad, lasci_ominus1
+import numpy as np
+import sys
+from pyscf import gto, scf, tools,lib, mcscf
+from pyscf.mcscf import avas,project_init_guess
+from pyscf import mcscf
+from mrh.my_pyscf.tools import molden
+from mrh.my_pyscf.mcscf import lasscf_async as asyn
+from mrh.util.chemistry import yamaguchi
+
+mol_name='Al_Fe_Fe.xyz' # Al-Fe-Fe MOF node
+basis={'C': 'cc-pvdz','H': 'cc-pvdz','O': 'cc-pvtz','Al': 'cc-pvtz','Fe': 'cc-pvtz'}
+output='lasscf_ls.log'
+lib.logger.TIMER_LEVEL = lib.logger.INFO
+mol=gto.M(atom=mol_name,verbose=4,spin=9,charge=0,basis=basis,max_memory=10000,output=output) #spin = 2S
+mol.use_gpu = False
+
+mf=scf.RHF(mol)
+mf=mf.density_fit()
+mf.max_cycle=1
+mf.mo_coeff=np.load('hf.npy')
+mf.kernel()
+
+mo_guess=np.load('las_1011_ud.npy')
+
+def lasuscc(spin_sub,frag0,frag1):
+    las=asyn.LASSCF(mf,(5,5),(frag0,frag1),spin_sub=spin_sub,verbose=4) # spin is 2S+1
+    las.set_fragments_(([17],[19]),mo_guess)
+    las.mo_coeff=mo_guess
+    las.kernel()
+    #if spin_sub==(5,6):
+    #    las.lasci()
+    #elif spin_sub==(1,2):
+    #    las.max_cycle_macro=1000
+    #    np.save('lasscf_10_11_lowspin', las.mo_coeff)
+    #    las.kernel()
+        
+    all_g, g_sel, a_idxs_selected, i_idxs_selected = grad.get_grad_exact(las, epsilon=0.03)
+    print ("All gradients = ", all_g)
+    print ("Selected gradients = ", g_sel)
+
+    excitations = []
+    for a, i in zip(a_idxs_selected, i_idxs_selected):
+        excitations.append((tuple(i), tuple(a[::-1])))
+
+    print ("Selected excitations = ", excitations)
+
+    epsilon=0.03
+    mc_uscc = mcscf.CASCI(mf,10,(5,6))
+    mc_uscc.mo_coeff = las.mo_coeff
+    lasci_ominus1.GLOBAL_MAX_CYCLE = 15000
+    mc_uscc.fcisolver = lasuccsd.FCISolver_USCC(mol, a_idxs_selected, i_idxs_selected)
+    #mc_uscc.fcisolver.nroots = 2
+    mc_uscc.fcisolver.norb_f = [5,5]
+    mc_uscc.kernel()
+    print("Epsilon: {:.9f} | Number of parameters: {:.0f} | LASUSCCSD energy: {:.9f}".format(epsilon, len(a_idxs_selected), mc_uscc.e_tot))
+    
+    #return spin_sub
+    return mc_uscc.fcisolver.energy, spin_sub
+#keep below after storing LS lasscf guess except the lasuscc calls
+
+spin_sub_LS = (5,6)
+frag0 = (5,1)
+frag1 =(0,5)
+#spin_HS = lasuscc(spin_sub_HS,alpha_HS,beta_HS)
+E_ls, spin_LS = lasuscc(spin_sub_LS,frag0,frag1)
+
+#E_HS, spin_HS = lasuscc(spin_sub_HS,alpha_HS,beta_HS)
+'''
+E_LS, spin_LS = lasuscc(spin_sub_LS,alpha_LS,beta_LS)
+
+
+S_HS = (spin_HS[0]-1)/2
+S_LS = (spin_LS[0]-1)/2
+S2_HS = S_HS*(S_HS+1)
+S2_LS = S_LS*(S_LS+1)
+
+E_roots = [E_LS, E_HS]
+S2_roots = [S2_LS, S2_HS]
+#J = yamaguchi(E_roots, S2_roots)
+J = (E_LS - E_HS)/(S2_HS - S2_LS) 
+print("Energies (LS, HS):", E_roots)
+print("S^2 (LS, HS):", S2_roots)
+print("J(LAS-USCC; 2 states) = {:.2f} cm^-1".format(J))
+'''
+#keep above
+'''
+#print(dir(mc_uscc.fcisolver))
+
+# Get energy directly from the solver
+E_roots = [mc_uscc.fcisolver.energy]
+
+# Active space info
+norb = mc_uscc.ncas
+nelec = mc_uscc.nelecas
+
+# Compute <S^2> for each root
+S2_roots = [mc_uscc.fcisolver.spin_square(0, norb, nelec)[0]]
+
+print("Energies from LASUSCC:", E_roots)
+print("<S^2> values:", S2_roots)
+
+# Only compute J if you have 2 energies
+if len(E_roots) == 2:
+    J = yamaguchi(E_roots, S2_roots)
+    print("J(LASUSCC; {} states) = {:.2f} cm^-1".format(len(E_roots), J))
+else:
+    print("Cannot compute J: need 2 spin states (HS + LS), currently have", len(E_roots))
+
+
+
+# After mc_uscc.kernel()
+#mc_uscc.analyze()
+
+# Extract energies manually
+#E_roots = [root.e for root in mc_uscc.fcisolver.root_list]  # list of energies for all roots
+if hasattr(mc_uscc.fcisolver, "e"):
+    E_roots = np.atleast_1d(mc_uscc.fcisolver.e)
+elif hasattr(mc_uscc.fcisolver, "e_tot"):
+    E_roots = np.atleast_1d(mc_uscc.fcisolver.e_tot)
+else:
+    raise AttributeError("Could not find energy attribute in FCISolver_USCC")
+
+print("Energies from LASUSCC:", E_roots)
+# Extract <S^2> for each root
+S2_roots = [mc_uscc.fcisolver.spin_square(i)[0] for i in range(mc_uscc.fcisolver.nroots)]
+
+# Compute J using Yamaguchi formula
+J = yamaguchi(E_roots, S2_roots)
+
+print("J(LASUSCC; {} states) = {:.2f} cm^-1".format(len(E_roots), J))
+'''
+print("done")
+#INFO: ******************** input file end ********************
+
+
+System: uname_result(system='Linux', node='midway3-0158.rcc.local', release='4.18.0-305.3.1.el8.x86_64', version='#1 SMP Tue Jun 1 16:14:33 UTC 2021', machine='x86_64', processor='x86_64')  Threads 8
+Python 3.8.8 (default, Apr 13 2021, 19:58:26) 
+[GCC 7.3.0]
+numpy 1.24.3  scipy 1.10.1  h5py 3.1.0
+Date: Mon Jan 19 23:25:13 2026
+PySCF version 2.9.0
+PySCF path  /project/lgagliardi/knight/LASSCF_gpudev/soft/pyscf
+GIT ORIG_HEAD fb281dda04a72d77a9d154b0fb8fc06793978bcd
+GIT HEAD (branch master) 623f6f0a1d94972ead2d432d1e76e0590c021bbe
+mrh path  /project/lgagliardi/knight/LASSCF_gpudev/soft/mrh
+GIT ORIG_HEAD 5e4d244b4a20999d6ca31b7fe8ddccdb096b3c48
+GIT HEAD (branch dev) 33569446f02a7811c385147c1633cae49c960c77
+
+[ENV] SHARED_PYSCF_ext /project/lgagliardi/shared/Apps/pyscf_ext/pyscf-forge
+[ENV] PYSCF_EXT_PATH /project/lgagliardi/shared/Apps/pyscf_ext/pyscf-forge
+[ENV] SHARED_PYSCF /project/lgagliardi/shared/Apps/pyscf
+[CONFIG] conf_file None
+[INPUT] verbose = 4
+[INPUT] num. atoms = 1
+[INPUT] num. electrons = 1
+[INPUT] charge = 0
+[INPUT] spin (= nelec alpha-beta = 2S) = 1
+[INPUT] symmetry False subgroup None
+[INPUT] Mole.unit = angstrom
+[INPUT] Symbol           X                Y                Z      unit          X                Y                Z       unit  Magmom
+[INPUT]  1 H      0.000000000000   0.000000000000   0.000000000000 AA    0.000000000000   0.000000000000   0.000000000000 Bohr   0.0
+
+nuclear repulsion = 0
+number of shells = 1
+number of NR pGTOs = 3
+number of NR cGTOs = 1
+basis = sto-3g
+ecp = {}
+CPU time:       491.28
+nmo = 674
+nfrag before gradorbs = 73
+nfrag after gradorbs 1 = 78
+Schmidt of density matrix with idempotency error = 5.911850e-12
+Schmidt decomp SVD error = 3.330669e-16
+nfrag after schmidt = 151
+nelec in fragment = 151
+nfrag after gradorbs 2 = 156
+nelec in fragment = 155
+25 occupied and 148 unoccupied inactive unentangled env orbs
+    CPU time for Two-electron integrals in embedding subspace      7.97 sec, wall time      1.00 sec
+    CPU time for df vj and vk      4.66 sec, wall time      0.58 sec
+    CPU time for vj ext      1.06 sec, wall time      0.13 sec
+    CPU time for vk ext      1.99 sec, wall time      0.27 sec
+    CPU time for df vj and vk      2.09 sec, wall time      0.26 sec
+
+******** <class 'pyscf.mcscf.addons.StateAverageDFImpurityCASSCF'> ********
+CAS (0e+5e, 5o), ncore = 75, nvir = 76
+max_cycle_macro = 50
+max_cycle_micro = 4
+conv_tol = 1e-07
+conv_tol_grad = None
+orbital rotation max_stepsize = 0.02
+orbital rotation threshold for CI restart = 0.01
+augmented hessian ah_max_cycle = 30
+augmented hessian ah_conv_tol = 1e-12
+augmented hessian ah_linear dependence = 1e-14
+augmented hessian ah_level shift = 1e-08
+augmented hessian ah_start_tol = 2.5
+augmented hessian ah_start_cycle = 3
+augmented hessian ah_grad_trust_region = 3
+kf_trust_region = 3
+kf_interval = 4
+ci_response_space = 4
+ci_grad_trust_region = 3
+with_dep4 0
+natorb = False
+canonicalization = True
+sorting_mo_energy = False
+ao2mo_level = 2
+chkfile = /scratch/local/jobs/44287516/tmpwcvk1rb2
+max_memory 10000 MB (current use 6234 MB)
+internal_rotation = False
+******** <class 'mrh.my_pyscf.mcscf.addons.get_h1e_zipped_fcisolver.<locals>.FCISolver'> ********
+max. cycles = 100
+conv_tol = 1e-10
+davidson only = False
+linear dependence = 1e-14
+level shift = 0.001
+max iter space = 12
+max_memory 10000 MB
+nroots = 1
+pspace_size = 200
+spin = -5
+State-average over 1 states with weights [1.0]
+DFCASCI/DFCASSCF: density fitting for JK matrix and 2e integral transformation
+    CPU time for density fitting ao2mo pass1      4.96 sec, wall time      0.63 sec
+    CPU time for density fitting papa pass2      0.14 sec, wall time      0.02 sec
+    CPU time for density fitting ppaa pass2      1.76 sec, wall time      0.22 sec
+    CPU time for df vj and vk      3.60 sec, wall time      0.45 sec
+    CPU time for density fitting ao2mo     10.47 sec, wall time      1.32 sec
+    CPU time for integral transformation to CAS space      0.00 sec, wall time      0.00 sec
+    CPU time for effective h1e in CAS space      0.00 sec, wall time      0.00 sec
+    CPU time for FCI solver      0.03 sec, wall time      0.00 sec
+CASCI E = -3971.79090922272  S^2 = 8.7500000
+Set conv_tol_grad to 0.000316228
+    CPU time for Initializing 1-step CASSCF     11.27 sec, wall time      1.42 sec
+    CPU time for CAS DM      0.00 sec, wall time      0.00 sec
+    CPU time for gen h_op      1.16 sec, wall time      0.15 sec
+    CPU time for df vj and vk      4.66 sec, wall time      0.58 sec
+    CPU time for df vj and vk      4.64 sec, wall time      0.58 sec
+    CPU time for df vj and vk      4.65 sec, wall time      0.58 sec
+    CPU time for orbital rotation     15.81 sec, wall time      1.98 sec
+    CPU time for update CAS DM      0.93 sec, wall time      0.12 sec
+    CPU time for micro iter  1      0.00 sec, wall time      0.00 sec
+    CPU time for density fitting ao2mo pass1      4.81 sec, wall time      0.61 sec
+    CPU time for density fitting papa pass2      0.13 sec, wall time      0.02 sec
+    CPU time for density fitting ppaa pass2      1.78 sec, wall time      0.22 sec
+    CPU time for df vj and vk      3.32 sec, wall time      0.42 sec
+    CPU time for density fitting ao2mo     10.05 sec, wall time      1.26 sec
+    CPU time for update eri     10.65 sec, wall time      1.34 sec
+    CPU time for integral transformation to CAS space      0.00 sec, wall time      0.00 sec
+    CPU time for effective h1e in CAS space      0.00 sec, wall time      0.00 sec
+    CPU time for FCI solver      0.02 sec, wall time      0.00 sec
+macro iter   1 (  3 JK    1 micro), CASSCF E = -3971.79090922334  dE = -6.20275387e-10  S^2 = 8.7500000
+               |grad[o]|=9.27e-05  |ddm|=    0  |maxRot[o]|=3.68e-06
+    CPU time for CASCI solver      0.13 sec, wall time      0.02 sec
+    CPU time for macro iter  1     27.52 sec, wall time      3.46 sec
+1-step CASSCF converged in   1 macro (  3 JK   1 micro) steps
+CASSCF canonicalization
+Density matrix diagonal elements [1. 1. 1. 1. 1.]
+    CPU time for 1-step CASSCF     40.26 sec, wall time      5.06 sec
+CASSCF energy = -3971.79090922334
+CASCI state   0  E = -3971.79090922334  E(CI) = -12.9835672906493  S^2 = 8.7500000
+CASCI state-averaged energy = -3971.79090922334
+CASCI energy for each state
+  State 0 weight 1  E = -3971.79090922334 S^2 = 8.7500000

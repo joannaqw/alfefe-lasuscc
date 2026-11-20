@@ -1,0 +1,12 @@
+# Software stack used via env/setup_env_midway3.sh (UChicago Midway3)
+# Recorded 2026-11-20 from /project/lgagliardi/knight/LASSCF_gpudev/soft.
+# NOTE: these checkouts were updated in Oct 2026, AFTER the calculations were run
+# (Jan-Apr 2026), so they may not be the exact commits used for the outputs here.
+python        3.8.8   (venv on top of module python/anaconda-2021.05)
+numpy         1.24.3
+scipy         1.10.1
+h5py          3.1.0
+pyscf         https://github.com/pyscf/pyscf.git        branch master  commit 52f57374ce073b75e9ca7a9dcabddfe9f7a9e920 (2026-10-11)
+pyscf-forge   https://github.com/pyscf/pyscf-forge.git  branch master  commit 2ba0e504d56e6f9aa098bb3ef877c743f8c8f0b2 (2026-10-09)
+mrh           https://github.com/cjknight/mrh.git       branch gpudev  commit 603e94440d44c689e0ccaf2e7d7afa02d3710f93 (2026-10-16)
+modules       python/anaconda-2021.05 cmake/3.26 mpich gcc cuda

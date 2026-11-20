@@ -1,0 +1,334 @@
+#INFO: **** input file is /project/lgagliardi/qjwang/al_fe_fe/LS/005/alfefe_lasuscc.py ****
+import pyscf
+from pyscf import gto, scf, lib, mcscf
+from mrh.my_pyscf.mcscf.lasscf_o0 import LASSCF
+from mrh.exploratory.unitary_cc import lasuccsd
+from mrh.exploratory.unitary_cc.uccsd_sym0 import get_uccsd_op
+from mrh.exploratory.citools import grad, lasci_ominus1
+import numpy as np
+import sys
+from pyscf import gto, scf, tools,lib, mcscf
+from pyscf.mcscf import avas,project_init_guess
+from pyscf import mcscf
+from mrh.my_pyscf.tools import molden
+from mrh.my_pyscf.mcscf import lasscf_async as asyn
+from mrh.util.chemistry import yamaguchi
+
+mol_name='Al_Fe_Fe.xyz' # Al-Fe-Fe MOF node
+basis={'C': 'cc-pvdz','H': 'cc-pvdz','O': 'cc-pvtz','Al': 'cc-pvtz','Fe': 'cc-pvtz'}
+output='lasscf_ls.log'
+lib.logger.TIMER_LEVEL = lib.logger.INFO
+mol=gto.M(atom=mol_name,verbose=4,spin=9,charge=0,basis=basis,max_memory=10000,output=output) #spin = 2S
+mol.use_gpu = False
+
+mf=scf.RHF(mol)
+mf=mf.density_fit()
+mf.max_cycle=1
+mf.mo_coeff=np.load('hf.npy')
+mf.kernel()
+
+mo_guess=np.load('las_1011_ud.npy')
+
+def lasuscc(spin_sub,frag0,frag1):
+    las=asyn.LASSCF(mf,(5,5),(frag0,frag1),spin_sub=spin_sub,verbose=4) # spin is 2S+1
+    las.set_fragments_(([17],[19]),mo_guess)
+    las.mo_coeff=mo_guess
+    las.kernel()
+    #if spin_sub==(5,6):
+    #    las.lasci()
+    #elif spin_sub==(1,2):
+    #    las.max_cycle_macro=1000
+    #    np.save('lasscf_10_11_lowspin', las.mo_coeff)
+    #    las.kernel()
+        
+    all_g, g_sel, a_idxs_selected, i_idxs_selected = grad.get_grad_exact(las, epsilon=0.005)
+    print ("All gradients = ", all_g)
+    print ("Selected gradients = ", g_sel)
+
+    excitations = []
+    for a, i in zip(a_idxs_selected, i_idxs_selected):
+        excitations.append((tuple(i), tuple(a[::-1])))
+
+    print ("Selected excitations = ", excitations)
+
+    epsilon=0.005
+    mc_uscc = mcscf.CASCI(mf,10,(5,6))
+    mc_uscc.mo_coeff = las.mo_coeff
+    lasci_ominus1.GLOBAL_MAX_CYCLE = 15000
+    mc_uscc.fcisolver = lasuccsd.FCISolver_USCC(mol, a_idxs_selected, i_idxs_selected)
+    #mc_uscc.fcisolver.nroots = 2
+    mc_uscc.fcisolver.norb_f = [5,5]
+    mc_uscc.kernel()
+    print("Epsilon: {:.9f} | Number of parameters: {:.0f} | LASUSCCSD energy: {:.9f}".format(epsilon, len(a_idxs_selected), mc_uscc.e_tot))
+    
+    #return spin_sub
+    return mc_uscc.fcisolver.energy, spin_sub
+#keep below after storing LS lasscf guess except the lasuscc calls
+
+spin_sub_LS = (5,6)
+frag0 = (5,1)
+frag1 =(0,5)
+#spin_HS = lasuscc(spin_sub_HS,alpha_HS,beta_HS)
+E_ls, spin_LS = lasuscc(spin_sub_LS,frag0,frag1)
+
+#E_HS, spin_HS = lasuscc(spin_sub_HS,alpha_HS,beta_HS)
+'''
+E_LS, spin_LS = lasuscc(spin_sub_LS,alpha_LS,beta_LS)
+
+
+S_HS = (spin_HS[0]-1)/2
+S_LS = (spin_LS[0]-1)/2
+S2_HS = S_HS*(S_HS+1)
+S2_LS = S_LS*(S_LS+1)
+
+E_roots = [E_LS, E_HS]
+S2_roots = [S2_LS, S2_HS]
+#J = yamaguchi(E_roots, S2_roots)
+J = (E_LS - E_HS)/(S2_HS - S2_LS) 
+print("Energies (LS, HS):", E_roots)
+print("S^2 (LS, HS):", S2_roots)
+print("J(LAS-USCC; 2 states) = {:.2f} cm^-1".format(J))
+'''
+#keep above
+'''
+#print(dir(mc_uscc.fcisolver))
+
+# Get energy directly from the solver
+E_roots = [mc_uscc.fcisolver.energy]
+
+# Active space info
+norb = mc_uscc.ncas
+nelec = mc_uscc.nelecas
+
+# Compute <S^2> for each root
+S2_roots = [mc_uscc.fcisolver.spin_square(0, norb, nelec)[0]]
+
+print("Energies from LASUSCC:", E_roots)
+print("<S^2> values:", S2_roots)
+
+# Only compute J if you have 2 energies
+if len(E_roots) == 2:
+    J = yamaguchi(E_roots, S2_roots)
+    print("J(LASUSCC; {} states) = {:.2f} cm^-1".format(len(E_roots), J))
+else:
+    print("Cannot compute J: need 2 spin states (HS + LS), currently have", len(E_roots))
+
+
+
+# After mc_uscc.kernel()
+#mc_uscc.analyze()
+
+# Extract energies manually
+#E_roots = [root.e for root in mc_uscc.fcisolver.root_list]  # list of energies for all roots
+if hasattr(mc_uscc.fcisolver, "e"):
+    E_roots = np.atleast_1d(mc_uscc.fcisolver.e)
+elif hasattr(mc_uscc.fcisolver, "e_tot"):
+    E_roots = np.atleast_1d(mc_uscc.fcisolver.e_tot)
+else:
+    raise AttributeError("Could not find energy attribute in FCISolver_USCC")
+
+print("Energies from LASUSCC:", E_roots)
+# Extract <S^2> for each root
+S2_roots = [mc_uscc.fcisolver.spin_square(i)[0] for i in range(mc_uscc.fcisolver.nroots)]
+
+# Compute J using Yamaguchi formula
+J = yamaguchi(E_roots, S2_roots)
+
+print("J(LASUSCC; {} states) = {:.2f} cm^-1".format(len(E_roots), J))
+'''
+print("done")
+#INFO: ******************** input file end ********************
+
+
+System: uname_result(system='Linux', node='midway3-0158.rcc.local', release='4.18.0-305.3.1.el8.x86_64', version='#1 SMP Tue Jun 1 16:14:33 UTC 2021', machine='x86_64', processor='x86_64')  Threads 8
+Python 3.8.8 (default, Apr 13 2021, 19:58:26) 
+[GCC 7.3.0]
+numpy 1.24.3  scipy 1.10.1  h5py 3.1.0
+Date: Mon Jan 19 16:49:23 2026
+PySCF version 2.9.0
+PySCF path  /project/lgagliardi/knight/LASSCF_gpudev/soft/pyscf
+GIT ORIG_HEAD fb281dda04a72d77a9d154b0fb8fc06793978bcd
+GIT HEAD (branch master) 623f6f0a1d94972ead2d432d1e76e0590c021bbe
+mrh path  /project/lgagliardi/knight/LASSCF_gpudev/soft/mrh
+GIT ORIG_HEAD 5e4d244b4a20999d6ca31b7fe8ddccdb096b3c48
+GIT HEAD (branch dev) 33569446f02a7811c385147c1633cae49c960c77
+
+[ENV] SHARED_PYSCF_ext /project/lgagliardi/shared/Apps/pyscf_ext/pyscf-forge
+[ENV] PYSCF_EXT_PATH /project/lgagliardi/shared/Apps/pyscf_ext/pyscf-forge
+[ENV] SHARED_PYSCF /project/lgagliardi/shared/Apps/pyscf
+[CONFIG] conf_file None
+[INPUT] verbose = 4
+[INPUT] num. atoms = 1
+[INPUT] num. electrons = 1
+[INPUT] charge = 0
+[INPUT] spin (= nelec alpha-beta = 2S) = 1
+[INPUT] symmetry False subgroup None
+[INPUT] Mole.unit = angstrom
+[INPUT] Symbol           X                Y                Z      unit          X                Y                Z       unit  Magmom
+[INPUT]  1 H      0.000000000000   0.000000000000   0.000000000000 AA    0.000000000000   0.000000000000   0.000000000000 Bohr   0.0
+
+nuclear repulsion = 0
+number of shells = 1
+number of NR pGTOs = 3
+number of NR cGTOs = 1
+basis = sto-3g
+ecp = {}
+CPU time:      1142.10
+    CPU time for Two-electron integrals in embedding subspace      2.01 sec, wall time      0.25 sec
+    CPU time for vj ext      0.71 sec, wall time      0.09 sec
+    CPU time for vk ext      0.86 sec, wall time      0.11 sec
+
+******** LASCI flags ********
+CAS (5e+6e, 10o), ncore = 0, nvir = 0
+Divided into 2 LAS spaces
+LAS 0 : (5e+1e, 5o)
+LAS 1 : (0e+5e, 5o)
+nroots = 1
+max_cycle_macro = 50
+max_cycle_micro = 5
+conv_tol_grad = 2.2170015078511785e-06
+max_memory 10000 MB (current use 6408 MB)
+fragment 0 FCI solver flags:
+******** <class 'mrh.my_pyscf.mcscf.addons.get_h1e_zipped_fcisolver.<locals>.FCISolver'> ********
+max. cycles = 100
+conv_tol = 1e-10
+davidson only = False
+linear dependence = 1e-14
+level shift = 0.001
+max iter space = 12
+max_memory 10000 MB
+nroots = 1
+pspace_size = 200
+spin = 4
+State-average over 1 states with weights [1.0]
+fragment 1 FCI solver flags:
+******** <class 'mrh.my_pyscf.mcscf.addons.get_h1e_zipped_fcisolver.<locals>.FCISolver'> ********
+max. cycles = 100
+conv_tol = 1e-10
+davidson only = False
+linear dependence = 1e-14
+level shift = 0.001
+max iter space = 12
+max_memory 10000 MB
+nroots = 1
+pspace_size = 200
+spin = -5
+State-average over 1 states with weights [1.0]
+    CPU time for integral transformation to LAS space      0.00 sec, wall time      0.00 sec
+    CPU time for LASCI initial get_veff      0.02 sec, wall time      0.00 sec
+LASCI subspace 0 with no orbsym information
+    CPU time for FCI box for subspace 0      0.12 sec, wall time      0.01 sec
+LASCI subspace 1 with no orbsym information
+    CPU time for FCI box for subspace 1      0.03 sec, wall time      0.00 sec
+LASCI subspace CI energies: [-542.8213093894344, -12.983567331015808]
+    CPU time for LASCI ci_cycle      0.15 sec, wall time      0.02 sec
+    CPU time for LASCI get_veff after ci      0.02 sec, wall time      0.00 sec
+    CPU time for LASCI sync preconditioner call      0.00 sec, wall time      0.00 sec
+    CPU time for LASCI sync preconditioner call      0.00 sec, wall time      0.00 sec
+LASCI macro 0 : E = -3971.79090924903 ; |g_int| = 1.21878128566542e-05 ; |g_ci| = 2.27374366119297e-13 ; |g_x| = 0
+    CPU time for LASCI Hessian constructor      0.30 sec, wall time      0.04 sec
+    CPU time for LASCI sync Hessian operator 1: unpack      0.01 sec, wall time      0.00 sec
+    CPU time for LASCI sync Hessian operator 2: effective density matrices      0.09 sec, wall time      0.01 sec
+    CPU time for LASCI get_veff_Heff 1      0.00 sec, wall time      0.00 sec
+    CPU time for LASCI get_veff_Heff 2      0.00 sec, wall time      0.00 sec
+    CPU time for LASCI get_veff_Heff 3      0.01 sec, wall time      0.00 sec
+    CPU time for LASCI get_veff_Heff 4      0.00 sec, wall time      0.00 sec
+    CPU time for LASCI get_veff_Heff 5      0.00 sec, wall time      0.00 sec
+    CPU time for LASCI sync Hessian operator 3: effective potentials      0.02 sec, wall time      0.00 sec
+    CPU time for LASCI sync Hessian operator 4: (Hx)_orb      0.00 sec, wall time      0.00 sec
+    CPU time for LASCI sync Hessian operator 5: (Hx)_CI offdiag      0.02 sec, wall time      0.00 sec
+    CPU time for LASCI sync Hessian operator 6: (Hx)_CI diag      0.01 sec, wall time      0.00 sec
+    CPU time for LASCI sync Hessian operator 7: level shift      0.01 sec, wall time      0.00 sec
+    CPU time for LASCI sync Hessian operator 8: pack      0.01 sec, wall time      0.00 sec
+    CPU time for LASCI sync Hessian operator total      0.17 sec, wall time      0.02 sec
+LASCI micro 1 : |x_orb| = 3.19754416132016e-07 ; |x_ci| = 4.18878396328451e-16
+    CPU time for LASCI 1 microcycles      0.18 sec, wall time      0.02 sec
+    CPU time for update_init      0.01 sec, wall time      0.00 sec
+    CPU time for update_mo      0.00 sec, wall time      0.00 sec
+    CPU time for update_ci      0.00 sec, wall time      0.00 sec
+    CPU time for update_h2eff_sub      0.00 sec, wall time      0.00 sec
+    CPU time for LASCI Hessian update      0.02 sec, wall time      0.00 sec
+    CPU time for LASCI get_veff after secondorder      0.01 sec, wall time      0.00 sec
+LASCI subspace 0 with no orbsym information
+    CPU time for FCI box for subspace 0      0.12 sec, wall time      0.02 sec
+LASCI subspace 1 with no orbsym information
+    CPU time for FCI box for subspace 1      0.03 sec, wall time      0.00 sec
+LASCI subspace CI energies: [-542.8213093864488, -12.98356733420091]
+    CPU time for LASCI ci_cycle      0.15 sec, wall time      0.02 sec
+    CPU time for LASCI get_veff after ci      0.02 sec, wall time      0.00 sec
+    CPU time for LASCI sync preconditioner call      0.00 sec, wall time      0.00 sec
+    CPU time for LASCI sync preconditioner call      0.00 sec, wall time      0.00 sec
+LASCI macro 1 : E = -3971.79090924903 ; |g_int| = 6.10135333748262e-06 ; |g_ci| = 2.2737435896791e-13 ; |g_x| = 0
+    CPU time for LASCI Hessian constructor      0.31 sec, wall time      0.04 sec
+    CPU time for LASCI sync Hessian operator 1: unpack      0.01 sec, wall time      0.00 sec
+    CPU time for LASCI sync Hessian operator 2: effective density matrices      0.07 sec, wall time      0.01 sec
+    CPU time for LASCI get_veff_Heff 1      0.00 sec, wall time      0.00 sec
+    CPU time for LASCI get_veff_Heff 2      0.00 sec, wall time      0.00 sec
+    CPU time for LASCI get_veff_Heff 3      0.01 sec, wall time      0.00 sec
+    CPU time for LASCI get_veff_Heff 4      0.00 sec, wall time      0.00 sec
+    CPU time for LASCI get_veff_Heff 5      0.00 sec, wall time      0.00 sec
+    CPU time for LASCI sync Hessian operator 3: effective potentials      0.02 sec, wall time      0.00 sec
+    CPU time for LASCI sync Hessian operator 4: (Hx)_orb      0.00 sec, wall time      0.00 sec
+    CPU time for LASCI sync Hessian operator 5: (Hx)_CI offdiag      0.02 sec, wall time      0.00 sec
+    CPU time for LASCI sync Hessian operator 6: (Hx)_CI diag      0.01 sec, wall time      0.00 sec
+    CPU time for LASCI sync Hessian operator 7: level shift      0.01 sec, wall time      0.00 sec
+    CPU time for LASCI sync Hessian operator 8: pack      0.01 sec, wall time      0.00 sec
+    CPU time for LASCI sync Hessian operator total      0.15 sec, wall time      0.02 sec
+LASCI micro 1 : |x_orb| = 1.85580789572839e-07 ; |x_ci| = 4.18878349719862e-16
+    CPU time for LASCI 1 microcycles      0.16 sec, wall time      0.02 sec
+    CPU time for update_init      0.01 sec, wall time      0.00 sec
+    CPU time for update_mo      0.00 sec, wall time      0.00 sec
+    CPU time for update_ci      0.00 sec, wall time      0.00 sec
+    CPU time for update_h2eff_sub      0.00 sec, wall time      0.00 sec
+    CPU time for LASCI Hessian update      0.02 sec, wall time      0.00 sec
+    CPU time for LASCI get_veff after secondorder      0.01 sec, wall time      0.00 sec
+LASCI subspace 0 with no orbsym information
+    CPU time for FCI box for subspace 0      0.12 sec, wall time      0.02 sec
+LASCI subspace 1 with no orbsym information
+    CPU time for FCI box for subspace 1      0.02 sec, wall time      0.00 sec
+LASCI subspace CI energies: [-542.8213093846372, -12.983567336076517]
+    CPU time for LASCI ci_cycle      0.15 sec, wall time      0.02 sec
+    CPU time for LASCI get_veff after ci      0.02 sec, wall time      0.00 sec
+    CPU time for LASCI sync preconditioner call      0.00 sec, wall time      0.00 sec
+    CPU time for LASCI sync preconditioner call      0.00 sec, wall time      0.00 sec
+LASCI macro 2 : E = -3971.79090924903 ; |g_int| = 3.05497996764738e-06 ; |g_ci| = 2.27374364102912e-13 ; |g_x| = 0
+    CPU time for LASCI Hessian constructor      0.31 sec, wall time      0.04 sec
+    CPU time for LASCI sync Hessian operator 1: unpack      0.01 sec, wall time      0.00 sec
+    CPU time for LASCI sync Hessian operator 2: effective density matrices      0.07 sec, wall time      0.01 sec
+    CPU time for LASCI get_veff_Heff 1      0.00 sec, wall time      0.00 sec
+    CPU time for LASCI get_veff_Heff 2      0.00 sec, wall time      0.00 sec
+    CPU time for LASCI get_veff_Heff 3      0.01 sec, wall time      0.00 sec
+    CPU time for LASCI get_veff_Heff 4      0.00 sec, wall time      0.00 sec
+    CPU time for LASCI get_veff_Heff 5      0.00 sec, wall time      0.00 sec
+    CPU time for LASCI sync Hessian operator 3: effective potentials      0.02 sec, wall time      0.00 sec
+    CPU time for LASCI sync Hessian operator 4: (Hx)_orb      0.00 sec, wall time      0.00 sec
+    CPU time for LASCI sync Hessian operator 5: (Hx)_CI offdiag      0.02 sec, wall time      0.00 sec
+    CPU time for LASCI sync Hessian operator 6: (Hx)_CI diag      0.01 sec, wall time      0.00 sec
+    CPU time for LASCI sync Hessian operator 7: level shift      0.01 sec, wall time      0.00 sec
+    CPU time for LASCI sync Hessian operator 8: pack      0.01 sec, wall time      0.00 sec
+    CPU time for LASCI sync Hessian operator total      0.16 sec, wall time      0.02 sec
+LASCI micro 1 : |x_orb| = 1.07813569465529e-07 ; |x_ci| = 4.18878383197052e-16
+    CPU time for LASCI 1 microcycles      0.16 sec, wall time      0.02 sec
+    CPU time for update_init      0.01 sec, wall time      0.00 sec
+    CPU time for update_mo      0.00 sec, wall time      0.00 sec
+    CPU time for update_ci      0.00 sec, wall time      0.00 sec
+    CPU time for update_h2eff_sub      0.00 sec, wall time      0.00 sec
+    CPU time for LASCI Hessian update      0.02 sec, wall time      0.00 sec
+    CPU time for LASCI get_veff after secondorder      0.01 sec, wall time      0.00 sec
+LASCI subspace 0 with no orbsym information
+    CPU time for FCI box for subspace 0      0.12 sec, wall time      0.01 sec
+LASCI subspace 1 with no orbsym information
+    CPU time for FCI box for subspace 1      0.02 sec, wall time      0.00 sec
+LASCI subspace CI energies: [-542.8213093835446, -12.983567337180515]
+    CPU time for LASCI ci_cycle      0.15 sec, wall time      0.02 sec
+    CPU time for LASCI get_veff after ci      0.02 sec, wall time      0.00 sec
+    CPU time for LASCI sync preconditioner call      0.00 sec, wall time      0.00 sec
+    CPU time for LASCI sync preconditioner call      0.00 sec, wall time      0.00 sec
+LASCI macro 3 : E = -3971.79090924903 ; |g_int| = 1.53003500363273e-06 ; |g_ci| = 2.27374350989845e-13 ; |g_x| = 0
+    CPU time for LASCI 3 macrocycles      2.48 sec, wall time      0.31 sec
+LASCI converged after 4 cycles
+LASCI E = -3971.79090924903 ; |g_int| = 1.53003500363273e-06 ; |g_ci| = 2.27374350989845e-13 ; |g_ext| = 0
+    CPU time for LASCI wrap-up      0.43 sec, wall time      0.05 sec
+    CPU time for LASCI canonicalization      0.02 sec, wall time      0.00 sec
+    CPU time for LASCI kernel function      2.63 sec, wall time      0.33 sec
+LASCI energy = -3971.79090924903
