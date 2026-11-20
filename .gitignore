@@ -2,3 +2,5 @@ slurm-*.out
 *.chk
 __pycache__/
 *.pyc
+soft/
+local_runs/

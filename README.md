@@ -24,7 +24,11 @@ LS_lasuscc/        low-spin LAS-USCCSD runs, one folder per gradient threshold e
     lasscf_ls.log*      PySCF/mrh logs (LASSCF + USCC CASCI iterations)
     lasuscc_alfefe.err  stderr (only warnings)
     *.npy, *.xyz, setup_env_midway3.sh -> symlinks into ../../inputs and ../../env
+run_local.py       laptop runner: `python run_local.py ls --eps 5e-2` / `python run_local.py hs`
 env/
+  environment.yml          conda environment for laptops (Linux/macOS/WSL2)
+  install_laptop.sh        one-time laptop setup (conda env + build mrh)
+  activate_laptop.sh       activate the laptop environment
   setup_env_midway3.sh     environment used for the runs (UChicago Midway3)
   software_versions.txt    pyscf / pyscf-forge / mrh commits, numpy/scipy versions
   install_from_source.sh   rebuild the stack on another machine
@@ -66,23 +70,47 @@ LS LASSCF energy (identical in every run): **-3971.790909246 Ha**.
 "CASCI converged" and ⟨S²⟩ are taken from the last `CASCI E = ...` line in `lasscf_ls.log`;
 "not converged" means the USCC optimizer stopped at the iteration cap.
 
-## How to run
+## How to run on a laptop (no HPC / Slurm)
 
-On Midway3 (with access to `/project/lgagliardi`):
+Works on Linux and macOS (on Windows, use WSL2). You need [Miniforge/conda](https://github.com/conda-forge/miniforge),
+an internet connection for the one-time setup, and about 16 GB of RAM.
+
+```bash
+git clone <this repo> && cd alfefe-lasuscc
+bash env/install_laptop.sh          # one time: conda env + pyscf 2.14.0 (pip) + builds mrh (CPU only)
+source env/activate_laptop.sh       # each new shell
+
+python run_local.py ls --eps 5e-2   # LS LASSCF + LAS-USCCSD, quickest case (11 parameters)
+python run_local.py hs              # reload HS orbitals; expect LASSCF = -3971.79166849 in 1 cycle
+```
+
+Options: `-n` threads (default: all cores), `--mem` max memory in MB (default 10000),
+`-o` output directory (default `local_runs/...`), `--max-cycle` USCC iteration cap (default 15000).
+Each run writes the PySCF log, `result.txt`, and the LASSCF orbitals to its output directory.
+`run_local.py` uses the same settings as the original inputs in `LS_lasuscc/eps_*/`.
+
+How long the original runs took (wall time on 8 CPU cores):
+
+| epsilon | 5e-2 … 2e-2 | 1e-2 | 5e-3 | 1e-3 | 1e-4 | 1e-5 … 1e-7 | 0 |
+|---|---|---|---|---|---|---|---|
+| wall time | ~5 min | ~2.5 h | ~3.5 h | ~1.5 h | ~29 h | ~2–2.5 days | ~7 days |
+
+Start with `--eps 5e-2` or `2e-2`. For small epsilon, use a workstation or HPC.
+
+## How to run on Midway3 (original setup)
 
 ```bash
 cd LS_lasuscc/eps_1e-3
 sbatch run.slurm          # sources setup_env_midway3.sh, writes lasuscc.out and lasscf_ls.log
 ```
-
-Elsewhere: build the stack with `bash env/install_from_source.sh <dir>`, activate it and set
-`PYTHONPATH` as printed at the end. In `env/setup_env_midway3.sh`, replace the paths
-and the `module` and `LD_PRELOAD` lines with your own, then run `python alfefe_lasuscc.py`
-inside a run folder. To check the HS orbitals: `cd HS_orbitals && ln -s ../inputs/hf.npy ../inputs/Al_Fe_Fe.xyz . && python hs_lasscf_check.py`.
-
-Resources used: 1 node, 8 CPUs, 10 GB/CPU.
+Resources used: 1 node, 8 CPUs, 10 GB/CPU. `env/install_from_source.sh` rebuilds the full
+original stack (pyscf, pyscf-forge, mrh from source) on another cluster.
 
 ## Caveats
+
+- The laptop setup (`env/install_laptop.sh`, `run_local.py`) has not been tested end-to-end yet.
+  It uses pip `pyscf==2.14.0` instead of the source checkout and skips pyscf-forge, which this
+  calculation doesn't import. On macOS, if building mrh fails on `-march=native` or OpenMP, please open an issue.
 
 - The pyscf/pyscf-forge/mrh checkouts listed in `env/software_versions.txt` were recorded after the
   runs; they were updated in Oct 2026, so they may differ from the exact code that produced these outputs.

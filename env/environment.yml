@@ -1,0 +1,22 @@
+# Conda environment for running on a laptop/workstation (Linux, macOS; Windows via WSL2).
+# Create with:  conda env create -f env/environment.yml
+name: alfefe-las
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - numpy=1.24
+  - scipy=1.10
+  - h5py
+  - cmake>=3.19
+  - make
+  - c-compiler
+  - cxx-compiler
+  - fortran-compiler
+  - libblas
+  - liblapack
+  - llvm-openmp        # OpenMP runtime for clang on macOS (harmless on Linux)
+  - git
+  - pip
+  - pip:
+      - pyscf==2.14.0  # same version as the checkout used on Midway3
